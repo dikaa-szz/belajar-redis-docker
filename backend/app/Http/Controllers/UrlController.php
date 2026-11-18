@@ -59,4 +59,30 @@ class ShortUrlController extends Controller
         // Redirect ke URL asli tujuan
         return redirect()->away($originalUrl);
     }
+
+    // 3. Endpoint untuk melihat statistik jumlah klik
+    public function stats($code)
+    {
+        $shortUrl = ShortUrl::where('short_code', $code)->first();
+
+        if (!$shortUrl) {
+            return response()->json([
+                'success' => false,
+                'message' => 'URL tidak ditemukan.'
+            ], 404);
+        }
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Statistik URL berhasil dimuat.',
+            'data' => [
+                'original_url' => $shortUrl->original_url,
+                'short_code' => $shortUrl->short_code,
+                'short_url' => url('/api/' . $shortUrl->short_code),
+                'clicks' => $shortUrl->clicks,
+                'created_at' => $shortUrl->created_at,
+                'updated_at' => $shortUrl->updated_at
+            ]
+        ], 200);
+    }
 }

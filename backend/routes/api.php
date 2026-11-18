@@ -2,7 +2,7 @@
 
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
-use Illuminate\Support\Str;
+use App\Http\Controllers\Api\ShortUrlController;
 
 Route::get('/test', function () {
     return response()->json([
@@ -10,23 +10,11 @@ Route::get('/test', function () {
     ]);
 });
 
-// Tambahkan route POST ini
-Route::post('/shorten', function (Request $request) {
-    // Validasi input sederhana untuk memastikan yang dikirim adalah URL valid
-    $request->validate([
-        'original_url' => 'required|url'
-    ]);
+// Endpoint untuk membuat Short URL
+Route::post('/shorten', [ShortUrlController::class, 'store']);
 
-    // Membuat kode acak sepanjang 6 karakter untuk URL pendek
-    $shortCode = Str::random(6);
+// Endpoint untuk melihat statistik (Wajib di atas route /{code} agar tidak dianggap sebagai short code)
+Route::get('/stats/{code}', [ShortUrlController::class, 'stats']);
 
-    return response()->json([
-        'success' => true,
-        'message' => 'URL berhasil dipendekkan!',
-        'data' => [
-            'original_url' => $request->original_url,
-            'short_code' => $shortCode,
-            'short_url' => url('/api/' . $shortCode)
-        ]
-    ], 201);
-});
+// Endpoint untuk redirect sekaligus menghitung klik (Click Counter)
+Route::get('/{code}', [ShortUrlController::class, 'redirect']);
