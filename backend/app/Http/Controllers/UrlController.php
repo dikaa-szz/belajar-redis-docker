@@ -1,78 +1,62 @@
 <?php
 
-namespace App\Http\Controllers;
+namespace App\Http\Controllers\Api;
 
-use App\Models\Url;
+use App\Http\Controllers\Controller;
+use App\Models\ShortUrl;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Str;
 
-class UrlController extends Controller
+class ShortUrlController extends Controller
 {
-    // Generate short URL
+    // 1. Endpoint untuk membuat Short URL
     public function store(Request $request)
     {
         $request->validate([
-            'original_url' => 'required|url',
+            'original_url' => 'required|url'
         ]);
 
-        // Cek apakah URL sudah pernah di-shorten
-        $existing = Url::where('original_url', $request->original_url)->first();
-        if ($existing) {
-            return response()->json([
-                'short_url' => url($existing->short_code),
-                'short_code' => $existing->short_code,
-                'original_url' => $existing->original_url,
-            ]);
-        }
+        $shortCode = Str::random(6);
 
-        // Generate unique short code
-        do {
-            $shortCode = Str::random(6);
-        } while (Url::where('short_code', $shortCode)->exists());
-
-        // Simpan ke database
-        $url = Url::create([
+        $shortUrl = ShortUrl::create([
             'original_url' => $request->original_url,
             'short_code' => $shortCode,
-            'clicks' => 0,
+            'clicks' => 0
         ]);
 
-        // Simpan ke Redis (cache)
-        Cache::put("url:{$shortCode}", $url->original_url, now()->addDays(30));
+        // Cache data ke Redis (durasi 24 jam)
+        Cache::put('short_url:' . $shortCode, $request->original_url, now()->addHours(24));
 
         return response()->json([
-            'short_url' => url($shortCode),
-            'short_code' => $shortCode,
-            'original_url' => $url->original_url,
+            'success' => true,
+            'message' => 'URL berhasil dibuat dan disimpan!',
+            'data' => [
+                'original_url' => $shortUrl->original_url,
+                'short_code' => $shortUrl->short_code,
+                'short_url' => url('/api/' . $shortUrl->short_code),
+                'clicks' => $shortUrl->clicks
+            ]
         ], 201);
     }
 
-    // Redirect + hit counter
-    public function redirect($shortCode)
+    // 2. Endpoint untuk Redirect sekaligus Menghitung Klik (Click Counter)
+    public function redirect($code)
     {
-        // Coba ambil dari Redis dulu
-        $originalUrl = Cache::get("url:{$shortCode}");
+        // Ambil URL asli dari Redis Cache, atau fallback ke Database MySQL jika cache kosong
+        $originalUrl = Cache::remember('short_url:' . $code, now()->addHours(24), function () use ($code) {
+            $shortUrl = ShortUrl::where('short_code', $code)->first();
+            return $shortUrl ? $shortUrl->original_url : null;
+        });
 
         if (!$originalUrl) {
-            // Kalau tidak ada di Redis, ambil dari database
-            $url = Url::where('short_code', $shortCode)->firstOrFail();
-            $originalUrl = $url->original_url;
-
-            // Simpan lagi ke Redis
-            Cache::put("url:{$shortCode}", $originalUrl, now()->addDays(30));
-        } else {
-            $url = Url::where('short_code', $shortCode)->first();
+            return response()->json(['message' => 'URL tidak ditemukan.'], 404);
         }
 
-        // Tambah hit counter di Redis
-        Cache::increment("clicks:{$shortCode}");
+        // Tambahkan jumlah klik di database MySQL secara otomatis
+        ShortUrl::where('short_code', $code)->increment('clicks');
 
-        // Update clicks di database (opsional, bisa di-queue nanti)
-        if ($url) {
-            $url->increment('clicks');
-        }
-
+        // Redirect ke URL asli tujuan
         return redirect()->away($originalUrl);
     }
 }
