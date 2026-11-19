@@ -1,7 +1,6 @@
 <?php
 
 namespace App\Http\Controllers\Api;
-
 use App\Http\Controllers\Controller;
 use App\Models\ShortUrl;
 use Illuminate\Http\Request;
@@ -39,7 +38,6 @@ class ShortUrlController extends Controller
             ]
         ], 201);
     }
-
     // 2. Endpoint untuk Redirect sekaligus Menghitung Klik (Click Counter)
     public function redirect($code)
     {
