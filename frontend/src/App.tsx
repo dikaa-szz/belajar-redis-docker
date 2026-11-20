@@ -1,5 +1,4 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import axios from 'axios';
 
 const API_BASE_URL = 'http://localhost:8000/api';
 const HISTORY_STORAGE_KEY = 'url_shortener_history_v1';
@@ -37,6 +36,16 @@ function loadHistoryFromStorage(): ShortUrlData[] {
     return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
+  }
+}
+
+async function parseJsonSafe<T>(response: Response): Promise<T | null> {
+  const text = await response.text();
+  if (!text) return null;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    return null;
   }
 }
 
@@ -87,18 +96,37 @@ export function App() {
     }
 
     try {
-      const response = await axios.post<ApiResponse<ShortUrlData>>(
-        `${API_BASE_URL}/shorten`,
-        payload,
-        {
-          headers: {
-            Accept: 'application/json',
-            'Content-Type': 'application/json',
-          },
-        }
+      const response = await fetch(`${API_BASE_URL}/shorten`, {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      });
+
+      const body = await parseJsonSafe<ApiResponse<ShortUrlData> & LaravelValidationError>(
+        response
       );
 
-      const created = response.data.data;
+      if (!response.ok || !body?.data) {
+        const validationErrors = body?.errors;
+        if (validationErrors) {
+          const firstFieldErrors = Object.values(validationErrors)[0];
+          setErrorMessage(
+            Array.isArray(firstFieldErrors) && firstFieldErrors.length > 0
+              ? firstFieldErrors[0]
+              : body?.message || 'Data tidak valid.'
+          );
+        } else {
+          setErrorMessage(
+            body?.message || 'Gagal membuat short URL dari server (http://localhost:8000).'
+          );
+        }
+        return;
+      }
+
+      const created = body.data;
       setResult(created);
       setStatsCode(created.short_code);
       setStatsData(created);
@@ -106,25 +134,8 @@ export function App() {
       setOriginalUrl('');
       setCustomCode('');
       upsertHistoryItem(created);
-    } catch (error) {
-      if (axios.isAxiosError<LaravelValidationError>(error)) {
-        const validationErrors = error.response?.data?.errors;
-        if (validationErrors) {
-          const firstFieldErrors = Object.values(validationErrors)[0];
-          setErrorMessage(
-            Array.isArray(firstFieldErrors) && firstFieldErrors.length > 0
-              ? firstFieldErrors[0]
-              : error.response?.data?.message || 'Data tidak valid.'
-          );
-        } else {
-          setErrorMessage(
-            error.response?.data?.message ||
-              'Gagal terhubung ke server backend (http://localhost:8000).'
-          );
-        }
-      } else {
-        setErrorMessage('Terjadi kesalahan tak terduga.');
-      }
+    } catch {
+      setErrorMessage('Gagal terhubung ke server backend (http://localhost:8000).');
     } finally {
       setIsLoading(false);
     }
@@ -142,16 +153,29 @@ export function App() {
     setRefreshingCode(cleanCode);
 
     try {
-      const response = await axios.get<ApiResponse<ShortUrlData>>(
+      const response = await fetch(
         `${API_BASE_URL}/stats/${encodeURIComponent(cleanCode)}`,
         {
+          method: 'GET',
           headers: {
             Accept: 'application/json',
           },
         }
       );
 
-      const latest = response.data.data;
+      const body = await parseJsonSafe<ApiResponse<ShortUrlData> & { message?: string }>(
+        response
+      );
+
+      if (!response.ok || !body?.data) {
+        setStatsData(null);
+        setStatsError(
+          body?.message || 'Short code tidak ditemukan atau terjadi kesalahan.'
+        );
+        return;
+      }
+
+      const latest = body.data;
       setStatsData(latest);
       upsertHistoryItem(latest);
 
@@ -160,15 +184,9 @@ export function App() {
           ? { ...prev, clicks: latest.clicks }
           : prev
       );
-    } catch (error) {
+    } catch {
       setStatsData(null);
-      if (axios.isAxiosError<{ message?: string }>(error)) {
-        setStatsError(
-          error.response?.data?.message || 'Short code tidak ditemukan atau terjadi kesalahan.'
-        );
-      } else {
-        setStatsError('Terjadi kesalahan saat mengambil statistik.');
-      }
+      setStatsError('Terjadi kesalahan saat mengambil statistik.');
     } finally {
       setIsCheckingStats(false);
       setRefreshingCode(null);
@@ -213,7 +231,6 @@ export function App() {
           </p>
         </header>
 
-        {/* Card Utama Form Shortener */}
         <section style={styles.card} aria-label="Form Buat Short URL">
           <form onSubmit={handleSubmit} style={styles.form}>
             <div style={styles.fieldGroup}>
@@ -308,7 +325,6 @@ export function App() {
           )}
         </section>
 
-        {/* Grid 2 Kolom: Cek Statistik & Riwayat */}
         <div style={styles.grid}>
           <section style={styles.card} aria-label="Cek Statistik Klik">
             <h2 style={styles.sectionTitle}>Cek Statistik Klik</h2>
