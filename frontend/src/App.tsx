@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react';
 
-const API_BASE_URL = 'http://localhost:8000/api';
+const API_BASE_URL = 'http://127.0.0.1:8001/api';
 const HISTORY_STORAGE_KEY = 'url_shortener_history_v1';
 
 interface ShortUrlData {
@@ -120,7 +120,7 @@ export function App() {
           );
         } else {
           setErrorMessage(
-            body?.message || 'Gagal membuat short URL dari server (http://localhost:8000).'
+            body?.message || `Gagal membuat short URL dari server (${API_BASE_URL}).`
           );
         }
         return;
@@ -135,7 +135,7 @@ export function App() {
       setCustomCode('');
       upsertHistoryItem(created);
     } catch {
-      setErrorMessage('Gagal terhubung ke server backend (http://localhost:8000).');
+      setErrorMessage(`Gagal terhubung ke server backend (${API_BASE_URL}).`);
     } finally {
       setIsLoading(false);
     }
