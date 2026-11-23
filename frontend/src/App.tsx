@@ -28,6 +28,13 @@ interface LaravelValidationError {
   errors?: Record<string, string[]>;
 }
 
+function slugifyCode(raw: string): string {
+  return raw
+    .trim()
+    .replace(/\s+/g, '-')
+    .replace(/[^A-Za-z0-9_-]/g, '');
+}
+
 function loadHistoryFromStorage(): ShortUrlData[] {
   try {
     const raw = localStorage.getItem(HISTORY_STORAGE_KEY);
@@ -49,13 +56,32 @@ async function parseJsonSafe<T>(response: Response): Promise<T | null> {
   }
 }
 
+function extractErrorMessage(
+  body: (ApiResponse<unknown> & LaravelValidationError) | null,
+  fallback: string
+): string {
+  if (body?.errors) {
+    const firstFieldErrors = Object.values(body.errors)[0];
+    if (Array.isArray(firstFieldErrors) && firstFieldErrors.length > 0) {
+      return firstFieldErrors[0];
+    }
+  }
+  return body?.message || fallback;
+}
+
 export function App() {
   const [originalUrl, setOriginalUrl] = useState<string>('');
   const [customCode, setCustomCode] = useState<string>('');
   const [result, setResult] = useState<ShortUrlData | null>(null);
   const [errorMessage, setErrorMessage] = useState<string>('');
+  const [statusNotice, setStatusNotice] = useState<string>('');
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
+
+  // State untuk ganti / setel ulang nama short_code yang sudah ada
+  const [editingCode, setEditingCode] = useState<string | null>(null);
+  const [renameInput, setRenameInput] = useState<string>('');
+  const [isRenaming, setIsRenaming] = useState<boolean>(false);
 
   const [history, setHistory] = useState<ShortUrlData[]>(() => loadHistoryFromStorage());
   const [refreshingCode, setRefreshingCode] = useState<string | null>(null);
@@ -73,9 +99,13 @@ export function App() {
     }
   }, [history]);
 
-  const upsertHistoryItem = (item: ShortUrlData) => {
+  const upsertHistoryItem = (item: ShortUrlData, previousCode?: string) => {
     setHistory((prev) => {
-      const filtered = prev.filter((entry) => entry.short_code !== item.short_code);
+      const filtered = prev.filter(
+        (entry) =>
+          entry.short_code !== item.short_code &&
+          (!previousCode || entry.short_code !== previousCode)
+      );
       return [item, ...filtered];
     });
   };
@@ -83,16 +113,18 @@ export function App() {
   const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setErrorMessage('');
+    setStatusNotice('');
     setResult(null);
     setCopiedCode(null);
     setIsLoading(true);
 
+    const cleanCustomCode = slugifyCode(customCode);
     const payload: ShortenPayload = {
       original_url: originalUrl.trim(),
     };
 
-    if (customCode.trim() !== '') {
-      payload.custom_code = customCode.trim();
+    if (cleanCustomCode !== '') {
+      payload.custom_code = cleanCustomCode;
     }
 
     try {
@@ -110,19 +142,9 @@ export function App() {
       );
 
       if (!response.ok || !body?.data) {
-        const validationErrors = body?.errors;
-        if (validationErrors) {
-          const firstFieldErrors = Object.values(validationErrors)[0];
-          setErrorMessage(
-            Array.isArray(firstFieldErrors) && firstFieldErrors.length > 0
-              ? firstFieldErrors[0]
-              : body?.message || 'Data tidak valid.'
-          );
-        } else {
-          setErrorMessage(
-            body?.message || `Gagal membuat short URL dari server (${API_BASE_URL}).`
-          );
-        }
+        setErrorMessage(
+          extractErrorMessage(body, `Gagal membuat short URL dari server (${API_BASE_URL}).`)
+        );
         return;
       }
 
@@ -133,11 +155,86 @@ export function App() {
       setStatsError('');
       setOriginalUrl('');
       setCustomCode('');
+      setStatusNotice(body.message || 'Short URL berhasil dibuat.');
       upsertHistoryItem(created);
     } catch {
       setErrorMessage(`Gagal terhubung ke server backend (${API_BASE_URL}).`);
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const startRename = (code: string) => {
+    setErrorMessage('');
+    setStatusNotice('');
+    setEditingCode(code);
+    setRenameInput(code);
+  };
+
+  const cancelRename = () => {
+    setEditingCode(null);
+    setRenameInput('');
+  };
+
+  const handleRenameSubmit = async (e: FormEvent<HTMLFormElement>, oldCode: string) => {
+    e.preventDefault();
+    const cleanNewCode = slugifyCode(renameInput);
+
+    if (!cleanNewCode) {
+      setErrorMessage('Masukkan nama short code baru terlebih dahulu.');
+      return;
+    }
+
+    if (cleanNewCode === oldCode) {
+      cancelRename();
+      return;
+    }
+
+    setErrorMessage('');
+    setStatusNotice('');
+    setIsRenaming(true);
+
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/urls/${encodeURIComponent(oldCode)}`,
+        {
+          method: 'PATCH',
+          headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ new_code: cleanNewCode }),
+        }
+      );
+
+      const body = await parseJsonSafe<
+        ApiResponse<ShortUrlData & { previous_code?: string }> & LaravelValidationError
+      >(response);
+
+      if (!response.ok || !body?.data) {
+        setErrorMessage(extractErrorMessage(body, 'Gagal mengubah nama short code.'));
+        return;
+      }
+
+      const updated = body.data;
+      upsertHistoryItem(updated, oldCode);
+
+      if (result?.short_code === oldCode) {
+        setResult(updated);
+      }
+      if (statsData?.short_code === oldCode || statsCode === oldCode) {
+        setStatsCode(updated.short_code);
+        setStatsData(updated);
+      }
+
+      setStatusNotice(
+        body.message || `Nama berhasil diubah menjadi ${updated.short_code}.`
+      );
+      cancelRename();
+    } catch {
+      setErrorMessage(`Gagal terhubung ke server backend (${API_BASE_URL}).`);
+    } finally {
+      setIsRenaming(false);
     }
   };
 
@@ -210,11 +307,46 @@ export function App() {
 
   const handleRemoveHistoryItem = (code: string) => {
     setHistory((prev) => prev.filter((item) => item.short_code !== code));
+    if (editingCode === code) {
+      cancelRename();
+    }
   };
 
   const handleClearHistory = () => {
     setHistory([]);
+    cancelRename();
   };
+
+  const renderRenameForm = (currentCode: string) => (
+    <form
+      onSubmit={(e) => void handleRenameSubmit(e, currentCode)}
+      style={styles.renameForm}
+    >
+      <input
+        type="text"
+        value={renameInput}
+        onChange={(e) => setRenameInput(e.target.value)}
+        placeholder="nama-baru-link"
+        style={styles.renameInput}
+        autoFocus
+      />
+      <button
+        type="submit"
+        disabled={isRenaming}
+        style={styles.miniPrimaryButton}
+      >
+        {isRenaming ? 'Menyimpan...' : 'Simpan Nama'}
+      </button>
+      <button
+        type="button"
+        onClick={cancelRename}
+        disabled={isRenaming}
+        style={styles.miniButton}
+      >
+        Batal
+      </button>
+    </form>
+  );
 
   return (
     <div style={styles.page}>
@@ -223,11 +355,11 @@ export function App() {
           <div style={styles.badgeRow}>
             <span style={styles.badge}>Laravel API</span>
             <span style={styles.badge}>MySQL</span>
-            <span style={styles.badge}>Redis Cache</span>
+            <span style={styles.badge}>Custom Alias</span>
           </div>
           <h1 style={styles.title}>URL Shortener Dashboard</h1>
           <p style={styles.subtitle}>
-            Pendekkan URL, pakai custom alias, akses redirect cepat, dan pantau jumlah klik secara langsung.
+            Pendekkan URL, atur nama custom agar rapi, ganti nama link kapan saja, dan pantau klik.
           </p>
         </header>
 
@@ -250,7 +382,7 @@ export function App() {
 
             <div style={styles.fieldGroup}>
               <label htmlFor="custom-code" style={styles.label}>
-                Custom Short Code <span style={styles.optional}>(Opsional)</span>
+                Custom Nama Link <span style={styles.optional}>(Opsional — huruf, angka, -, _)</span>
               </label>
               <input
                 id="custom-code"
@@ -260,6 +392,11 @@ export function App() {
                 onChange={(e) => setCustomCode(e.target.value)}
                 style={styles.input}
               />
+              {customCode.trim() !== '' && (
+                <span style={styles.helperText}>
+                  Pratinjau nama rapi: <strong>{slugifyCode(customCode) || '-'}</strong>
+                </span>
+              )}
             </div>
 
             <button
@@ -274,6 +411,12 @@ export function App() {
               {isLoading ? 'Membuat Short URL...' : 'Buat Short URL'}
             </button>
           </form>
+
+          {statusNotice && (
+            <div role="status" style={styles.noticeBox}>
+              {statusNotice}
+            </div>
+          )}
 
           {errorMessage && (
             <div role="alert" style={styles.errorBox}>
@@ -308,6 +451,13 @@ export function App() {
                   </button>
                   <button
                     type="button"
+                    onClick={() => startRename(result.short_code)}
+                    style={styles.secondaryButton}
+                  >
+                    Ganti Nama
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => void fetchStatsByCode(result.short_code)}
                     disabled={refreshingCode === result.short_code}
                     style={styles.secondaryButton}
@@ -317,8 +467,10 @@ export function App() {
                 </div>
               </div>
 
+              {editingCode === result.short_code && renderRenameForm(result.short_code)}
+
               <div style={styles.metaText}>
-                <div><strong>Kode:</strong> {result.short_code}</div>
+                <div><strong>Nama / Kode:</strong> {result.short_code}</div>
                 <div style={{ wordBreak: 'break-all' }}><strong>Tujuan:</strong> {result.original_url}</div>
               </div>
             </div>
@@ -329,13 +481,13 @@ export function App() {
           <section style={styles.card} aria-label="Cek Statistik Klik">
             <h2 style={styles.sectionTitle}>Cek Statistik Klik</h2>
             <p style={styles.sectionDesc}>
-              Cek jumlah klik terbaru berdasarkan <code>short_code</code>.
+              Cek jumlah klik terbaru berdasarkan nama / <code>short_code</code>.
             </p>
 
             <form onSubmit={handleStatsSubmit} style={styles.statsForm}>
               <input
                 type="text"
-                placeholder="Masukkan short code..."
+                placeholder="Masukkan nama short code..."
                 value={statsCode}
                 onChange={(e) => setStatsCode(e.target.value)}
                 style={{ ...styles.input, flex: 1 }}
@@ -409,6 +561,8 @@ export function App() {
 
                     <div style={styles.historyUrl}>{item.original_url}</div>
 
+                    {editingCode === item.short_code && renderRenameForm(item.short_code)}
+
                     <div style={styles.actionGroup}>
                       <button
                         type="button"
@@ -416,6 +570,13 @@ export function App() {
                         style={styles.miniButton}
                       >
                         {copiedCode === item.short_code ? 'Tersalin' : 'Salin'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => startRename(item.short_code)}
+                        style={styles.miniButton}
+                      >
+                        Ganti Nama
                       </button>
                       <button
                         type="button"
@@ -522,6 +683,10 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#64748b',
     fontSize: '0.82rem',
   },
+  helperText: {
+    fontSize: '0.8rem',
+    color: '#475569',
+  },
   input: {
     padding: '11px 14px',
     borderRadius: '8px',
@@ -568,6 +733,16 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 500,
     fontSize: '0.82rem',
     cursor: 'pointer',
+  },
+  noticeBox: {
+    marginTop: '14px',
+    padding: '11px 14px',
+    borderRadius: '8px',
+    backgroundColor: '#f0fdf4',
+    border: '1px solid #bbf7d0',
+    color: '#15803d',
+    fontSize: '0.88rem',
+    fontWeight: 500,
   },
   errorBox: {
     marginTop: '14px',
@@ -626,6 +801,25 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     gap: '8px',
     flexWrap: 'wrap',
+  },
+  renameForm: {
+    display: 'flex',
+    gap: '8px',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    padding: '10px',
+    borderRadius: '8px',
+    backgroundColor: '#eef2ff',
+    border: '1px solid #c7d2fe',
+  },
+  renameInput: {
+    flex: '1 1 180px',
+    padding: '7px 10px',
+    borderRadius: '6px',
+    border: '1px solid #94a3b8',
+    fontSize: '0.86rem',
+    backgroundColor: '#ffffff',
+    color: '#0f172a',
   },
   metaText: {
     fontSize: '0.85rem',
@@ -724,6 +918,16 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '0.8rem',
     color: '#64748b',
     wordBreak: 'break-all',
+  },
+  miniPrimaryButton: {
+    padding: '5px 10px',
+    borderRadius: '6px',
+    border: 'none',
+    backgroundColor: '#2563eb',
+    color: '#ffffff',
+    fontSize: '0.78rem',
+    fontWeight: 600,
+    cursor: 'pointer',
   },
   miniButton: {
     padding: '4px 9px',
