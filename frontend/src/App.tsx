@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
+import QRCode from 'qrcode';
 
 const API_BASE_URL = 'http://127.0.0.1:8001/api';
 const HISTORY_STORAGE_KEY = 'url_shortener_history_v1';
@@ -98,6 +99,11 @@ export function App() {
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
 
+  // State untuk QR Code
+  const [activeQrCode, setActiveQrCode] = useState<string | null>(null);
+  const [qrImageMap, setQrImageMap] = useState<Record<string, string>>({});
+  const [qrError, setQrError] = useState<string>('');
+
   // State untuk ganti / setel ulang nama short_code yang sudah ada
   const [editingCode, setEditingCode] = useState<string | null>(null);
   const [renameInput, setRenameInput] = useState<string>('');
@@ -128,6 +134,51 @@ export function App() {
       pollTimeoutsRef.current = [];
     };
   }, []);
+
+  const ensureQrDataUrl = async (code: string, targetUrl: string): Promise<string | null> => {
+    if (qrImageMap[code]) {
+      return qrImageMap[code];
+    }
+
+    try {
+      const dataUrl = await QRCode.toDataURL(targetUrl, {
+        width: 240,
+        margin: 2,
+        errorCorrectionLevel: 'M',
+      });
+      setQrImageMap((prev) => ({ ...prev, [code]: dataUrl }));
+      return dataUrl;
+    } catch {
+      setQrError('Gagal membuat QR Code untuk link ini.');
+      return null;
+    }
+  };
+
+  const handleToggleQr = async (code: string, targetUrl: string) => {
+    setQrError('');
+    if (activeQrCode === code) {
+      setActiveQrCode(null);
+      return;
+    }
+
+    const dataUrl = await ensureQrDataUrl(code, targetUrl);
+    if (dataUrl) {
+      setActiveQrCode(code);
+    }
+  };
+
+  const handleDownloadQr = async (code: string, targetUrl: string) => {
+    setQrError('');
+    const dataUrl = await ensureQrDataUrl(code, targetUrl);
+    if (!dataUrl) return;
+
+    const link = document.createElement('a');
+    link.href = dataUrl;
+    link.download = `qr-${code}.png`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
 
   const upsertHistoryItem = (item: ShortUrlData, previousCode?: string) => {
     setHistory((prev) => {
@@ -223,7 +274,6 @@ export function App() {
     }
   };
 
-  // Sinkronisasi berkala jika liveSync aktif dan ada kode yang sedang ditampilkan di statistik
   useEffect(() => {
     const activeCode = extractShortCode(statsData?.short_code || statsCode);
     if (!liveSync || !activeCode) return;
@@ -280,6 +330,7 @@ export function App() {
     e.preventDefault();
     setErrorMessage('');
     setStatusNotice('');
+    setQrError('');
     setResult(null);
     setCopiedCode(null);
     setIsLoading(true);
@@ -392,6 +443,10 @@ export function App() {
         setStatsCode(updated.short_code);
         setStatsData(updated);
       }
+      if (activeQrCode === oldCode) {
+        setActiveQrCode(updated.short_code);
+        void ensureQrDataUrl(updated.short_code, updated.short_url);
+      }
 
       setStatusNotice(
         body.message || `Nama berhasil diubah menjadi ${updated.short_code}.`
@@ -424,11 +479,55 @@ export function App() {
     if (editingCode === code) {
       cancelRename();
     }
+    if (activeQrCode === code) {
+      setActiveQrCode(null);
+    }
   };
 
   const handleClearHistory = () => {
     setHistory([]);
     cancelRename();
+    setActiveQrCode(null);
+  };
+
+  const renderQrPanel = (code: string, shortUrl: string) => {
+    if (activeQrCode !== code) return null;
+    const imgSrc = qrImageMap[code];
+
+    return (
+      <div style={styles.qrBox}>
+        {imgSrc ? (
+          <>
+            <img
+              src={imgSrc}
+              alt={`QR Code untuk ${shortUrl}`}
+              style={styles.qrImage}
+            />
+            <div style={styles.qrCaption}>
+              Scan untuk membuka: <strong>{shortUrl}</strong>
+            </div>
+            <div style={styles.actionGroup}>
+              <button
+                type="button"
+                onClick={() => void handleDownloadQr(code, shortUrl)}
+                style={styles.miniPrimaryButton}
+              >
+                Unduh PNG
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveQrCode(null)}
+                style={styles.miniButton}
+              >
+                Tutup QR
+              </button>
+            </div>
+          </>
+        ) : (
+          <div style={styles.helperText}>Membuat QR Code...</div>
+        )}
+      </div>
+    );
   };
 
   const renderRenameForm = (currentCode: string) => (
@@ -469,11 +568,11 @@ export function App() {
           <div style={styles.badgeRow}>
             <span style={styles.badge}>Laravel API</span>
             <span style={styles.badge}>MySQL</span>
-            <span style={styles.badge}>Live Click Sync</span>
+            <span style={styles.badge}>QR Code Ready</span>
           </div>
           <h1 style={styles.title}>URL Shortener Dashboard</h1>
           <p style={styles.subtitle}>
-            Pendekkan URL, atur nama custom agar rapi, ganti nama link kapan saja, dan pantau klik secara langsung.
+            Pendekkan URL, atur nama custom agar rapi, ubah ke QR Code, dan pantau klik secara langsung.
           </p>
         </header>
 
@@ -532,6 +631,12 @@ export function App() {
             </div>
           )}
 
+          {qrError && (
+            <div role="alert" style={styles.errorBox}>
+              {qrError}
+            </div>
+          )}
+
           {errorMessage && (
             <div role="alert" style={styles.errorBox}>
               {errorMessage}
@@ -566,6 +671,20 @@ export function App() {
                   </button>
                   <button
                     type="button"
+                    onClick={() => void handleToggleQr(result.short_code, result.short_url)}
+                    style={styles.secondaryButton}
+                  >
+                    {activeQrCode === result.short_code ? 'Sembunyikan QR' : 'QR Code'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleDownloadQr(result.short_code, result.short_url)}
+                    style={styles.secondaryButton}
+                  >
+                    Unduh QR
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => startRename(result.short_code)}
                     style={styles.secondaryButton}
                   >
@@ -584,6 +703,7 @@ export function App() {
                 </div>
               </div>
 
+              {renderQrPanel(result.short_code, result.short_url)}
               {editingCode === result.short_code && renderRenameForm(result.short_code)}
 
               <div style={styles.metaText}>
@@ -655,7 +775,7 @@ export function App() {
             <div style={styles.historyTop}>
               <div>
                 <h2 style={styles.sectionTitle}>Riwayat ({history.length})</h2>
-                <p style={styles.sectionDesc}>Klik link di bawah untuk menguji & memantau klik.</p>
+                <p style={styles.sectionDesc}>Klik link untuk menguji klik atau buat QR Code.</p>
               </div>
               {history.length > 0 && (
                 <button
@@ -691,6 +811,7 @@ export function App() {
 
                     <div style={styles.historyUrl}>{item.original_url}</div>
 
+                    {renderQrPanel(item.short_code, item.short_url)}
                     {editingCode === item.short_code && renderRenameForm(item.short_code)}
 
                     <div style={styles.actionGroup}>
@@ -700,6 +821,13 @@ export function App() {
                         style={styles.miniButton}
                       >
                         {copiedCode === item.short_code ? 'Tersalin' : 'Salin'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleToggleQr(item.short_code, item.short_url)}
+                        style={styles.miniButton}
+                      >
+                        {activeQrCode === item.short_code ? 'Tutup QR' : 'QR Code'}
                       </button>
                       <button
                         type="button"
@@ -931,6 +1059,27 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     gap: '8px',
     flexWrap: 'wrap',
+  },
+  qrBox: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: '10px',
+    padding: '14px',
+    borderRadius: '10px',
+    backgroundColor: '#ffffff',
+    border: '1px solid #cbd5e1',
+  },
+  qrImage: {
+    width: '180px',
+    height: '180px',
+    borderRadius: '8px',
+  },
+  qrCaption: {
+    fontSize: '0.8rem',
+    color: '#475569',
+    textAlign: 'center',
+    wordBreak: 'break-all',
   },
   renameForm: {
     display: 'flex',
