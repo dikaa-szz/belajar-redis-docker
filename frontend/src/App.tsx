@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 
 const API_BASE_URL = 'http://127.0.0.1:8001/api';
 const HISTORY_STORAGE_KEY = 'url_shortener_history_v1';
@@ -33,6 +33,26 @@ function slugifyCode(raw: string): string {
     .trim()
     .replace(/\s+/g, '-')
     .replace(/[^A-Za-z0-9_-]/g, '');
+}
+
+// Mengambil short_code saja jika user menempelkan URL lengkap (misal: http://127.0.0.1:8001/api/halo)
+function extractShortCode(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return '';
+
+  try {
+    if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+      const parsed = new URL(trimmed);
+      const segments = parsed.pathname.split('/').filter(Boolean);
+      return segments[segments.length - 1] ?? '';
+    }
+  } catch {
+    // Jika bukan URL valid, lanjutkan pembersihan manual di bawah
+  }
+
+  const withoutQuery = trimmed.split('?')[0].split('#')[0];
+  const segments = withoutQuery.split('/').filter(Boolean);
+  return segments[segments.length - 1] ?? '';
 }
 
 function loadHistoryFromStorage(): ShortUrlData[] {
@@ -90,6 +110,9 @@ export function App() {
   const [statsData, setStatsData] = useState<ShortUrlData | null>(null);
   const [statsError, setStatsError] = useState<string>('');
   const [isCheckingStats, setIsCheckingStats] = useState<boolean>(false);
+  const [liveSync, setLiveSync] = useState<boolean>(true);
+
+  const pollTimeoutsRef = useRef<number[]>([]);
 
   useEffect(() => {
     try {
@@ -99,6 +122,13 @@ export function App() {
     }
   }, [history]);
 
+  useEffect(() => {
+    return () => {
+      pollTimeoutsRef.current.forEach((id) => window.clearTimeout(id));
+      pollTimeoutsRef.current = [];
+    };
+  }, []);
+
   const upsertHistoryItem = (item: ShortUrlData, previousCode?: string) => {
     setHistory((prev) => {
       const filtered = prev.filter(
@@ -107,6 +137,142 @@ export function App() {
           (!previousCode || entry.short_code !== previousCode)
       );
       return [item, ...filtered];
+    });
+  };
+
+  const applyLatestStats = (latest: ShortUrlData) => {
+    upsertHistoryItem(latest);
+
+    setResult((prev) =>
+      prev && prev.short_code === latest.short_code
+        ? { ...prev, clicks: latest.clicks, short_url: latest.short_url }
+        : prev
+    );
+
+    setStatsData((prev) =>
+      prev && prev.short_code === latest.short_code ? latest : prev
+    );
+  };
+
+  const fetchStatsByCode = async (
+    targetCode: string,
+    options?: { silent?: boolean; selectAsActiveStats?: boolean }
+  ) => {
+    const cleanCode = extractShortCode(targetCode);
+    if (!cleanCode) {
+      if (!options?.silent) {
+        setStatsError('Masukkan short code terlebih dahulu.');
+      }
+      return null;
+    }
+
+    if (options?.selectAsActiveStats) {
+      setStatsCode(cleanCode);
+    }
+
+    if (!options?.silent) {
+      setStatsError('');
+      setIsCheckingStats(true);
+      setRefreshingCode(cleanCode);
+    }
+
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/stats/${encodeURIComponent(cleanCode)}`,
+        {
+          method: 'GET',
+          headers: {
+            Accept: 'application/json',
+          },
+        }
+      );
+
+      const body = await parseJsonSafe<ApiResponse<ShortUrlData> & { message?: string }>(
+        response
+      );
+
+      if (!response.ok || !body?.data) {
+        if (!options?.silent) {
+          setStatsData(null);
+          setStatsError(
+            body?.message || 'Short code tidak ditemukan atau terjadi kesalahan.'
+          );
+        }
+        return null;
+      }
+
+      const latest = body.data;
+      if (options?.selectAsActiveStats) {
+        setStatsCode(latest.short_code);
+        setStatsData(latest);
+        setStatsError('');
+      }
+      applyLatestStats(latest);
+      return latest;
+    } catch {
+      if (!options?.silent) {
+        setStatsData(null);
+        setStatsError('Terjadi kesalahan saat mengambil statistik.');
+      }
+      return null;
+    } finally {
+      if (!options?.silent) {
+        setIsCheckingStats(false);
+        setRefreshingCode(null);
+      }
+    }
+  };
+
+  // Sinkronisasi berkala jika liveSync aktif dan ada kode yang sedang ditampilkan di statistik
+  useEffect(() => {
+    const activeCode = extractShortCode(statsData?.short_code || statsCode);
+    if (!liveSync || !activeCode) return;
+
+    const intervalId = window.setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        void fetchStatsByCode(activeCode, { silent: true });
+      }
+    }, 3000);
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void fetchStatsByCode(activeCode, { silent: true });
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [liveSync, statsData?.short_code, statsCode]);
+
+  const handleLinkClick = (item: ShortUrlData) => {
+    const code = extractShortCode(item.short_code || item.short_url);
+    if (!code) return;
+
+    const optimisticClicks = (item.clicks ?? 0) + 1;
+    const optimisticItem: ShortUrlData = {
+      ...item,
+      short_code: code,
+      clicks: optimisticClicks,
+    };
+
+    applyLatestStats(optimisticItem);
+    setStatsCode(code);
+    setStatsData((prev) =>
+      prev && prev.short_code === code
+        ? { ...prev, clicks: optimisticClicks }
+        : prev
+    );
+
+    const delays = [400, 1200, 2500];
+    delays.forEach((delay) => {
+      const timeoutId = window.setTimeout(() => {
+        void fetchStatsByCode(code, { silent: true });
+      }, delay);
+      pollTimeoutsRef.current.push(timeoutId);
     });
   };
 
@@ -238,61 +404,9 @@ export function App() {
     }
   };
 
-  const fetchStatsByCode = async (targetCode: string) => {
-    const cleanCode = targetCode.trim();
-    if (!cleanCode) {
-      setStatsError('Masukkan short code terlebih dahulu.');
-      return;
-    }
-
-    setStatsError('');
-    setIsCheckingStats(true);
-    setRefreshingCode(cleanCode);
-
-    try {
-      const response = await fetch(
-        `${API_BASE_URL}/stats/${encodeURIComponent(cleanCode)}`,
-        {
-          method: 'GET',
-          headers: {
-            Accept: 'application/json',
-          },
-        }
-      );
-
-      const body = await parseJsonSafe<ApiResponse<ShortUrlData> & { message?: string }>(
-        response
-      );
-
-      if (!response.ok || !body?.data) {
-        setStatsData(null);
-        setStatsError(
-          body?.message || 'Short code tidak ditemukan atau terjadi kesalahan.'
-        );
-        return;
-      }
-
-      const latest = body.data;
-      setStatsData(latest);
-      upsertHistoryItem(latest);
-
-      setResult((prev) =>
-        prev && prev.short_code === latest.short_code
-          ? { ...prev, clicks: latest.clicks }
-          : prev
-      );
-    } catch {
-      setStatsData(null);
-      setStatsError('Terjadi kesalahan saat mengambil statistik.');
-    } finally {
-      setIsCheckingStats(false);
-      setRefreshingCode(null);
-    }
-  };
-
   const handleStatsSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    await fetchStatsByCode(statsCode);
+    await fetchStatsByCode(statsCode, { selectAsActiveStats: true });
   };
 
   const handleCopy = async (shortUrl: string, code: string) => {
@@ -355,11 +469,11 @@ export function App() {
           <div style={styles.badgeRow}>
             <span style={styles.badge}>Laravel API</span>
             <span style={styles.badge}>MySQL</span>
-            <span style={styles.badge}>Custom Alias</span>
+            <span style={styles.badge}>Live Click Sync</span>
           </div>
           <h1 style={styles.title}>URL Shortener Dashboard</h1>
           <p style={styles.subtitle}>
-            Pendekkan URL, atur nama custom agar rapi, ganti nama link kapan saja, dan pantau klik.
+            Pendekkan URL, atur nama custom agar rapi, ganti nama link kapan saja, dan pantau klik secara langsung.
           </p>
         </header>
 
@@ -436,6 +550,7 @@ export function App() {
                   href={result.short_url}
                   target="_blank"
                   rel="noreferrer"
+                  onClick={() => handleLinkClick(result)}
                   style={styles.shortUrlLink}
                 >
                   {result.short_url}
@@ -458,7 +573,9 @@ export function App() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => void fetchStatsByCode(result.short_code)}
+                    onClick={() =>
+                      void fetchStatsByCode(result.short_code, { selectAsActiveStats: true })
+                    }
                     disabled={refreshingCode === result.short_code}
                     style={styles.secondaryButton}
                   >
@@ -479,15 +596,27 @@ export function App() {
 
         <div style={styles.grid}>
           <section style={styles.card} aria-label="Cek Statistik Klik">
-            <h2 style={styles.sectionTitle}>Cek Statistik Klik</h2>
-            <p style={styles.sectionDesc}>
-              Cek jumlah klik terbaru berdasarkan nama / <code>short_code</code>.
-            </p>
+            <div style={styles.statsHeaderRow}>
+              <div>
+                <h2 style={styles.sectionTitle}>Statistik Klik Realtime</h2>
+                <p style={styles.sectionDesc}>
+                  Angka naik otomatis saat link diklik & disinkronkan tiap 3 detik.
+                </p>
+              </div>
+              <label style={styles.toggleLabel}>
+                <input
+                  type="checkbox"
+                  checked={liveSync}
+                  onChange={(e) => setLiveSync(e.target.checked)}
+                />
+                <span>Auto-sync</span>
+              </label>
+            </div>
 
             <form onSubmit={handleStatsSubmit} style={styles.statsForm}>
               <input
                 type="text"
-                placeholder="Masukkan nama short code..."
+                placeholder="Masukkan kode atau link pendek..."
                 value={statsCode}
                 onChange={(e) => setStatsCode(e.target.value)}
                 style={{ ...styles.input, flex: 1 }}
@@ -526,7 +655,7 @@ export function App() {
             <div style={styles.historyTop}>
               <div>
                 <h2 style={styles.sectionTitle}>Riwayat ({history.length})</h2>
-                <p style={styles.sectionDesc}>Tersimpan lokal di browser ini.</p>
+                <p style={styles.sectionDesc}>Klik link di bawah untuk menguji & memantau klik.</p>
               </div>
               {history.length > 0 && (
                 <button
@@ -552,6 +681,7 @@ export function App() {
                         href={item.short_url}
                         target="_blank"
                         rel="noreferrer"
+                        onClick={() => handleLinkClick(item)}
                         style={styles.historyLink}
                       >
                         {item.short_url}
@@ -582,7 +712,7 @@ export function App() {
                         type="button"
                         onClick={() => {
                           setStatsCode(item.short_code);
-                          void fetchStatsByCode(item.short_code);
+                          void fetchStatsByCode(item.short_code, { selectAsActiveStats: true });
                         }}
                         disabled={refreshingCode === item.short_code}
                         style={styles.miniButton}
@@ -833,6 +963,22 @@ const styles: Record<string, React.CSSProperties> = {
     gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
     gap: '20px',
     alignItems: 'start',
+  },
+  statsHeaderRow: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    gap: '10px',
+  },
+  toggleLabel: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '6px',
+    fontSize: '0.8rem',
+    fontWeight: 600,
+    color: '#334155',
+    cursor: 'pointer',
+    whiteSpace: 'nowrap',
   },
   sectionTitle: {
     margin: '0 0 4px',
