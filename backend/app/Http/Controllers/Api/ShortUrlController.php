@@ -10,12 +10,19 @@ use Illuminate\Support\Str;
 
 class ShortUrlController extends Controller
 {
-    // 1. Endpoint untuk membuat Short URL
+    // 1. Endpoint untuk membuat Short URL (mendukung custom_code)
     public function store(Request $request)
     {
         $validated = $request->validate([
             'original_url' => ['required', 'url', 'max:2048'],
-            'custom_code' => ['nullable', 'string', 'alpha_dash', 'min:3', 'max:32', 'unique:short_urls,short_code'],
+            'custom_code' => [
+                'nullable',
+                'string',
+                'regex:/^[A-Za-z0-9_-]+$/',
+                'min:3',
+                'max:32',
+                'unique:short_urls,short_code',
+            ],
         ]);
 
         $shortCode = !empty($validated['custom_code'])
@@ -28,7 +35,6 @@ class ShortUrlController extends Controller
             'clicks' => 0,
         ]);
 
-        // Cache data ke Redis (durasi 24 jam)
         Cache::put('short_url:' . $shortCode, $validated['original_url'], now()->addHours(24));
 
         return response()->json([
@@ -43,10 +49,56 @@ class ShortUrlController extends Controller
         ], 201);
     }
 
-    // 2. Endpoint untuk Redirect sekaligus Menghitung Klik (Click Counter)
-    public function redirect($code)
+    // 2. Endpoint untuk menyetel ulang / mengganti short_code yang sudah ada
+    public function updateCode(Request $request, string $code)
     {
-        // Ambil URL asli dari Redis Cache, atau fallback ke Database MySQL jika cache kosong
+        $shortUrl = ShortUrl::where('short_code', $code)->first();
+
+        if (!$shortUrl) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Short URL tidak ditemukan.',
+            ], 404);
+        }
+
+        $validated = $request->validate([
+            'new_code' => [
+                'required',
+                'string',
+                'regex:/^[A-Za-z0-9_-]+$/',
+                'min:3',
+                'max:32',
+                'unique:short_urls,short_code,' . $shortUrl->id,
+            ],
+        ]);
+
+        $oldCode = $shortUrl->short_code;
+        $newCode = $validated['new_code'];
+
+        $shortUrl->update([
+            'short_code' => $newCode,
+        ]);
+
+        // Bersihkan cache kode lama & simpan cache kode baru
+        Cache::forget('short_url:' . $oldCode);
+        Cache::put('short_url:' . $newCode, $shortUrl->original_url, now()->addHours(24));
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Short code berhasil diperbarui!',
+            'data' => [
+                'original_url' => $shortUrl->original_url,
+                'short_code' => $shortUrl->short_code,
+                'short_url' => url('/api/' . $shortUrl->short_code),
+                'clicks' => $shortUrl->clicks,
+                'previous_code' => $oldCode,
+            ],
+        ], 200);
+    }
+
+    // 3. Endpoint untuk Redirect sekaligus Menghitung Klik
+    public function redirect(string $code)
+    {
         $originalUrl = Cache::remember('short_url:' . $code, now()->addHours(24), function () use ($code) {
             $shortUrl = ShortUrl::where('short_code', $code)->first();
             return $shortUrl ? $shortUrl->original_url : null;
@@ -56,15 +108,13 @@ class ShortUrlController extends Controller
             return response()->json(['message' => 'URL tidak ditemukan.'], 404);
         }
 
-        // Tambahkan jumlah klik di database MySQL secara otomatis
         ShortUrl::where('short_code', $code)->increment('clicks');
 
-        // Redirect ke URL asli tujuan
         return redirect()->away($originalUrl);
     }
 
-    // 3. Endpoint untuk melihat statistik jumlah klik
-    public function stats($code)
+    // 4. Endpoint untuk melihat statistik jumlah klik
+    public function stats(string $code)
     {
         $shortUrl = ShortUrl::where('short_code', $code)->first();
 
