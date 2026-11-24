@@ -4,6 +4,15 @@ import QRCode from 'qrcode';
 const API_BASE_URL = 'http://127.0.0.1:8001/api';
 const HISTORY_STORAGE_KEY = 'url_shortener_history_v1';
 
+type QrErrorCorrectionLevel = 'L' | 'M' | 'Q' | 'H';
+
+interface QrCustomization {
+  fgColor: string;
+  bgColor: string;
+  errorCorrectionLevel: QrErrorCorrectionLevel;
+  downloadSize: number;
+}
+
 interface ShortUrlData {
   original_url: string;
   short_code: string;
@@ -28,6 +37,21 @@ interface LaravelValidationError {
   message?: string;
   errors?: Record<string, string[]>;
 }
+
+const DEFAULT_QR_CUSTOM: QrCustomization = {
+  fgColor: '#0f172a',
+  bgColor: '#ffffff',
+  errorCorrectionLevel: 'M',
+  downloadSize: 400,
+};
+
+const QR_COLOR_PRESETS: Array<{ label: string; fg: string; bg: string }> = [
+  { label: 'Klasik Gelap', fg: '#0f172a', bg: '#ffffff' },
+  { label: 'Biru Royal', fg: '#1d4ed8', bg: '#eff6ff' },
+  { label: 'Hijau Zamrud', fg: '#047857', bg: '#ecfdf5' },
+  { label: 'Ungu Modern', fg: '#6d28d9', bg: '#f5f3ff' },
+  { label: 'Mode Gelap', fg: '#f8fafc', bg: '#0f172a' },
+];
 
 function slugifyCode(raw: string): string {
   return raw
@@ -99,10 +123,12 @@ export function App() {
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
 
-  // State untuk QR Code
+  // State untuk Custom QR Code
   const [activeQrCode, setActiveQrCode] = useState<string | null>(null);
+  const [qrCustom, setQrCustom] = useState<QrCustomization>(DEFAULT_QR_CUSTOM);
   const [qrImageMap, setQrImageMap] = useState<Record<string, string>>({});
   const [qrError, setQrError] = useState<string>('');
+  const [copiedQrCode, setCopiedQrCode] = useState<string | null>(null);
 
   // State untuk ganti / setel ulang nama short_code yang sudah ada
   const [editingCode, setEditingCode] = useState<string | null>(null);
@@ -135,24 +161,66 @@ export function App() {
     };
   }, []);
 
-  const ensureQrDataUrl = async (code: string, targetUrl: string): Promise<string | null> => {
-    if (qrImageMap[code]) {
-      return qrImageMap[code];
+  const buildQrCacheKey = (code: string, custom: QrCustomization) =>
+    `${code}|${custom.fgColor}|${custom.bgColor}|${custom.errorCorrectionLevel}|${custom.downloadSize}`;
+
+  const generateQrDataUrl = async (
+    code: string,
+    targetUrl: string,
+    custom: QrCustomization = qrCustom,
+    widthPx = 260
+  ): Promise<string | null> => {
+    const cacheKey = `${buildQrCacheKey(code, custom)}|w=${widthPx}`;
+    if (qrImageMap[cacheKey]) {
+      return qrImageMap[cacheKey];
     }
 
     try {
       const dataUrl = await QRCode.toDataURL(targetUrl, {
-        width: 240,
+        width: widthPx,
         margin: 2,
-        errorCorrectionLevel: 'M',
+        errorCorrectionLevel: custom.errorCorrectionLevel,
+        color: {
+          dark: custom.fgColor,
+          light: custom.bgColor,
+        },
       });
-      setQrImageMap((prev) => ({ ...prev, [code]: dataUrl }));
+      setQrImageMap((prev) => ({ ...prev, [cacheKey]: dataUrl }));
       return dataUrl;
     } catch {
-      setQrError('Gagal membuat QR Code untuk link ini.');
+      setQrError('Gagal membuat QR Code. Coba periksa kontras warna atau format URL.');
       return null;
     }
   };
+
+  // Render ulang pratinjau QR saat kustomisasi berubah dan panel QR sedang terbuka
+  useEffect(() => {
+    if (!activeQrCode) return;
+
+    const targetItem =
+      result?.short_code === activeQrCode
+        ? result
+        : history.find((item) => item.short_code === activeQrCode);
+
+    if (!targetItem) return;
+
+    let cancelled = false;
+    void (async () => {
+      const dataUrl = await generateQrDataUrl(
+        targetItem.short_code,
+        targetItem.short_url,
+        qrCustom,
+        260
+      );
+      if (!cancelled && dataUrl) {
+        setQrError('');
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeQrCode, qrCustom, result, history]);
 
   const handleToggleQr = async (code: string, targetUrl: string) => {
     setQrError('');
@@ -161,7 +229,7 @@ export function App() {
       return;
     }
 
-    const dataUrl = await ensureQrDataUrl(code, targetUrl);
+    const dataUrl = await generateQrDataUrl(code, targetUrl, qrCustom, 260);
     if (dataUrl) {
       setActiveQrCode(code);
     }
@@ -169,15 +237,50 @@ export function App() {
 
   const handleDownloadQr = async (code: string, targetUrl: string) => {
     setQrError('');
-    const dataUrl = await ensureQrDataUrl(code, targetUrl);
+    const dataUrl = await generateQrDataUrl(
+      code,
+      targetUrl,
+      qrCustom,
+      qrCustom.downloadSize
+    );
     if (!dataUrl) return;
 
     const link = document.createElement('a');
     link.href = dataUrl;
-    link.download = `qr-${code}.png`;
+    link.download = `qr-${code}-${qrCustom.downloadSize}px.png`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+  };
+
+  const handleCopyQrImage = async (code: string, targetUrl: string) => {
+    setQrError('');
+    if (
+      typeof ClipboardItem === 'undefined' ||
+      !navigator.clipboard ||
+      typeof navigator.clipboard.write !== 'function'
+    ) {
+      setQrError('Browser ini tidak mendukung salin gambar langsung ke clipboard. Gunakan Unduh PNG.');
+      return;
+    }
+
+    const dataUrl = await generateQrDataUrl(
+      code,
+      targetUrl,
+      qrCustom,
+      qrCustom.downloadSize
+    );
+    if (!dataUrl) return;
+
+    try {
+      const res = await fetch(dataUrl);
+      const blob = await res.blob();
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+      setCopiedQrCode(code);
+      setTimeout(() => setCopiedQrCode((prev) => (prev === code ? null : prev)), 2000);
+    } catch {
+      setQrError('Gagal menyalin gambar QR ke clipboard. Coba gunakan Unduh PNG.');
+    }
   };
 
   const upsertHistoryItem = (item: ShortUrlData, previousCode?: string) => {
@@ -445,7 +548,7 @@ export function App() {
       }
       if (activeQrCode === oldCode) {
         setActiveQrCode(updated.short_code);
-        void ensureQrDataUrl(updated.short_code, updated.short_url);
+        void generateQrDataUrl(updated.short_code, updated.short_url, qrCustom, 260);
       }
 
       setStatusNotice(
@@ -492,40 +595,170 @@ export function App() {
 
   const renderQrPanel = (code: string, shortUrl: string) => {
     if (activeQrCode !== code) return null;
-    const imgSrc = qrImageMap[code];
+    const previewKey = `${buildQrCacheKey(code, qrCustom)}|w=260`;
+    const imgSrc = qrImageMap[previewKey];
 
     return (
       <div style={styles.qrBox}>
-        {imgSrc ? (
-          <>
-            <img
-              src={imgSrc}
-              alt={`QR Code untuk ${shortUrl}`}
-              style={styles.qrImage}
-            />
+        <div style={styles.qrLayout}>
+          <div style={styles.qrPreviewCol}>
+            {imgSrc ? (
+              <img
+                src={imgSrc}
+                alt={`QR Code untuk ${shortUrl}`}
+                style={{
+                  ...styles.qrImage,
+                  backgroundColor: qrCustom.bgColor,
+                }}
+              />
+            ) : (
+              <div style={styles.qrPlaceholder}>Membuat QR...</div>
+            )}
             <div style={styles.qrCaption}>
-              Scan untuk membuka: <strong>{shortUrl}</strong>
+              Target: <strong>{shortUrl}</strong>
             </div>
+          </div>
+
+          <div style={styles.qrControlsCol}>
+            <div style={styles.qrSectionLabel}>Preset Tema Cepat</div>
+            <div style={styles.presetRow}>
+              {QR_COLOR_PRESETS.map((preset) => {
+                const isSelected =
+                  qrCustom.fgColor.toLowerCase() === preset.fg.toLowerCase() &&
+                  qrCustom.bgColor.toLowerCase() === preset.bg.toLowerCase();
+                return (
+                  <button
+                    key={preset.label}
+                    type="button"
+                    onClick={() =>
+                      setQrCustom((prev) => ({
+                        ...prev,
+                        fgColor: preset.fg,
+                        bgColor: preset.bg,
+                      }))
+                    }
+                    style={{
+                      ...styles.presetChip,
+                      borderColor: isSelected ? '#2563eb' : '#cbd5e1',
+                      backgroundColor: isSelected ? '#eff6ff' : '#ffffff',
+                    }}
+                  >
+                    <span
+                      style={{
+                        ...styles.swatchDot,
+                        backgroundColor: preset.fg,
+                        borderColor: preset.bg,
+                      }}
+                    />
+                    <span>{preset.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div style={styles.qrColorGrid}>
+              <label style={styles.qrFieldLabel}>
+                <span>Warna QR</span>
+                <div style={styles.colorInputWrap}>
+                  <input
+                    type="color"
+                    value={qrCustom.fgColor}
+                    onChange={(e) =>
+                      setQrCustom((prev) => ({ ...prev, fgColor: e.target.value }))
+                    }
+                    style={styles.colorPicker}
+                  />
+                  <span style={styles.colorHex}>{qrCustom.fgColor.toUpperCase()}</span>
+                </div>
+              </label>
+
+              <label style={styles.qrFieldLabel}>
+                <span>Warna Latar</span>
+                <div style={styles.colorInputWrap}>
+                  <input
+                    type="color"
+                    value={qrCustom.bgColor}
+                    onChange={(e) =>
+                      setQrCustom((prev) => ({ ...prev, bgColor: e.target.value }))
+                    }
+                    style={styles.colorPicker}
+                  />
+                  <span style={styles.colorHex}>{qrCustom.bgColor.toUpperCase()}</span>
+                </div>
+              </label>
+            </div>
+
+            <div style={styles.qrColorGrid}>
+              <label style={styles.qrFieldLabel}>
+                <span>Resolusi Unduh</span>
+                <select
+                  value={qrCustom.downloadSize}
+                  onChange={(e) =>
+                    setQrCustom((prev) => ({
+                      ...prev,
+                      downloadSize: Number(e.target.value),
+                    }))
+                  }
+                  style={styles.qrSelect}
+                >
+                  <option value={240}>240 x 240 px</option>
+                  <option value={400}>400 x 400 px</option>
+                  <option value={600}>600 x 600 px</option>
+                </select>
+              </label>
+
+              <label style={styles.qrFieldLabel}>
+                <span>Error Correction</span>
+                <select
+                  value={qrCustom.errorCorrectionLevel}
+                  onChange={(e) =>
+                    setQrCustom((prev) => ({
+                      ...prev,
+                      errorCorrectionLevel: e.target.value as QrErrorCorrectionLevel,
+                    }))
+                  }
+                  style={styles.qrSelect}
+                >
+                  <option value="L">L — Rendah (7%)</option>
+                  <option value="M">M — Sedang (15%)</option>
+                  <option value="Q">Q — Tinggi (25%)</option>
+                  <option value="H">H — Maksimal (30%)</option>
+                </select>
+              </label>
+            </div>
+
             <div style={styles.actionGroup}>
               <button
                 type="button"
                 onClick={() => void handleDownloadQr(code, shortUrl)}
                 style={styles.miniPrimaryButton}
               >
-                Unduh PNG
+                Unduh PNG ({qrCustom.downloadSize}px)
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleCopyQrImage(code, shortUrl)}
+                style={styles.miniButton}
+              >
+                {copiedQrCode === code ? 'Gambar Tersalin' : 'Salin Gambar'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setQrCustom(DEFAULT_QR_CUSTOM)}
+                style={styles.miniButton}
+              >
+                Reset
               </button>
               <button
                 type="button"
                 onClick={() => setActiveQrCode(null)}
                 style={styles.miniButton}
               >
-                Tutup QR
+                Tutup
               </button>
             </div>
-          </>
-        ) : (
-          <div style={styles.helperText}>Membuat QR Code...</div>
-        )}
+          </div>
+        </div>
       </div>
     );
   };
@@ -568,11 +801,11 @@ export function App() {
           <div style={styles.badgeRow}>
             <span style={styles.badge}>Laravel API</span>
             <span style={styles.badge}>MySQL</span>
-            <span style={styles.badge}>QR Code Ready</span>
+            <span style={styles.badge}>Custom QR Code</span>
           </div>
           <h1 style={styles.title}>URL Shortener Dashboard</h1>
           <p style={styles.subtitle}>
-            Pendekkan URL, atur nama custom agar rapi, ubah ke QR Code, dan pantau klik secara langsung.
+            Pendekkan URL, atur nama custom agar rapi, kustomisasi QR Code, dan pantau klik secara langsung.
           </p>
         </header>
 
@@ -674,14 +907,7 @@ export function App() {
                     onClick={() => void handleToggleQr(result.short_code, result.short_url)}
                     style={styles.secondaryButton}
                   >
-                    {activeQrCode === result.short_code ? 'Sembunyikan QR' : 'QR Code'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void handleDownloadQr(result.short_code, result.short_url)}
-                    style={styles.secondaryButton}
-                  >
-                    Unduh QR
+                    {activeQrCode === result.short_code ? 'Tutup Custom QR' : 'Custom QR'}
                   </button>
                   <button
                     type="button"
@@ -775,7 +1001,7 @@ export function App() {
             <div style={styles.historyTop}>
               <div>
                 <h2 style={styles.sectionTitle}>Riwayat ({history.length})</h2>
-                <p style={styles.sectionDesc}>Klik link untuk menguji klik atau buat QR Code.</p>
+                <p style={styles.sectionDesc}>Klik link untuk menguji klik atau kustomisasi QR.</p>
               </div>
               {history.length > 0 && (
                 <button
@@ -827,7 +1053,7 @@ export function App() {
                         onClick={() => void handleToggleQr(item.short_code, item.short_url)}
                         style={styles.miniButton}
                       >
-                        {activeQrCode === item.short_code ? 'Tutup QR' : 'QR Code'}
+                        {activeQrCode === item.short_code ? 'Tutup QR' : 'Custom QR'}
                       </button>
                       <button
                         type="button"
@@ -1061,25 +1287,124 @@ const styles: Record<string, React.CSSProperties> = {
     flexWrap: 'wrap',
   },
   qrBox: {
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    gap: '10px',
     padding: '14px',
     borderRadius: '10px',
     backgroundColor: '#ffffff',
     border: '1px solid #cbd5e1',
   },
+  qrLayout: {
+    display: 'flex',
+    gap: '18px',
+    flexWrap: 'wrap',
+    alignItems: 'flex-start',
+  },
+  qrPreviewCol: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: '8px',
+    flex: '0 0 210px',
+  },
   qrImage: {
-    width: '180px',
-    height: '180px',
+    width: '190px',
+    height: '190px',
     borderRadius: '8px',
+    border: '1px solid #e2e8f0',
+  },
+  qrPlaceholder: {
+    width: '190px',
+    height: '190px',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: '8px',
+    border: '1px dashed #cbd5e1',
+    color: '#64748b',
+    fontSize: '0.82rem',
   },
   qrCaption: {
-    fontSize: '0.8rem',
+    fontSize: '0.78rem',
     color: '#475569',
     textAlign: 'center',
     wordBreak: 'break-all',
+  },
+  qrControlsCol: {
+    flex: '1 1 260px',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '10px',
+  },
+  qrSectionLabel: {
+    fontSize: '0.8rem',
+    fontWeight: 700,
+    color: '#334155',
+  },
+  presetRow: {
+    display: 'flex',
+    gap: '6px',
+    flexWrap: 'wrap',
+  },
+  presetChip: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '6px',
+    padding: '5px 9px',
+    borderRadius: '999px',
+    border: '1px solid #cbd5e1',
+    fontSize: '0.76rem',
+    fontWeight: 600,
+    color: '#0f172a',
+    cursor: 'pointer',
+  },
+  swatchDot: {
+    width: '11px',
+    height: '11px',
+    borderRadius: '50%',
+    border: '1px solid #94a3b8',
+    display: 'inline-block',
+  },
+  qrColorGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))',
+    gap: '10px',
+  },
+  qrFieldLabel: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '4px',
+    fontSize: '0.78rem',
+    fontWeight: 600,
+    color: '#334155',
+  },
+  colorInputWrap: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    padding: '5px 8px',
+    borderRadius: '7px',
+    border: '1px solid #cbd5e1',
+    backgroundColor: '#f8fafc',
+  },
+  colorPicker: {
+    width: '26px',
+    height: '22px',
+    padding: 0,
+    border: 'none',
+    background: 'transparent',
+    cursor: 'pointer',
+  },
+  colorHex: {
+    fontSize: '0.78rem',
+    fontFamily: 'monospace',
+    color: '#0f172a',
+  },
+  qrSelect: {
+    padding: '7px 9px',
+    borderRadius: '7px',
+    border: '1px solid #cbd5e1',
+    backgroundColor: '#ffffff',
+    color: '#0f172a',
+    fontSize: '0.82rem',
   },
   renameForm: {
     display: 'flex',
