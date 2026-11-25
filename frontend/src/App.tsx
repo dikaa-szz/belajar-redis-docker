@@ -122,6 +122,7 @@ export function App() {
   const [statusNotice, setStatusNotice] = useState<string>('');
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
+  const [sharedCode, setSharedCode] = useState<string | null>(null);
 
   // State untuk Custom QR Code
   const [activeQrCode, setActiveQrCode] = useState<string | null>(null);
@@ -577,6 +578,44 @@ export function App() {
     }
   };
 
+  const markSharedFeedback = (code: string) => {
+    setSharedCode(code);
+    window.setTimeout(() => {
+      setSharedCode((prev) => (prev === code ? null : prev));
+    }, 2000);
+  };
+
+  const handleNativeShare = async (item: ShortUrlData) => {
+    const shareText = `Cek link ini: ${item.short_url}`;
+
+    if (typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
+      try {
+        await navigator.share({
+          title: `Short Link (${item.short_code})`,
+          text: shareText,
+          url: item.short_url,
+        });
+        markSharedFeedback(item.short_code);
+        return;
+      } catch (err) {
+        if (err instanceof Error && err.name === 'AbortError') {
+          return;
+        }
+      }
+    }
+
+    await handleCopy(item.short_url, item.short_code);
+    setStatusNotice('Link disalin ke clipboard (Web Share tidak didukung di browser ini).');
+  };
+
+  const getWhatsAppShareUrl = (item: ShortUrlData) =>
+    `https://wa.me/?text=${encodeURIComponent(`Cek link ini: ${item.short_url}`)}`;
+
+  const getTelegramShareUrl = (item: ShortUrlData) =>
+    `https://t.me/share/url?url=${encodeURIComponent(item.short_url)}&text=${encodeURIComponent(
+      `Link pendek: ${item.short_code}`
+    )}`;
+
   const handleRemoveHistoryItem = (code: string) => {
     setHistory((prev) => prev.filter((item) => item.short_code !== code));
     if (editingCode === code) {
@@ -802,10 +841,11 @@ export function App() {
             <span style={styles.badge}>Laravel API</span>
             <span style={styles.badge}>MySQL</span>
             <span style={styles.badge}>Custom QR Code</span>
+            <span style={styles.badge}>Bagikan Link</span>
           </div>
           <h1 style={styles.title}>URL Shortener Dashboard</h1>
           <p style={styles.subtitle}>
-            Pendekkan URL, atur nama custom agar rapi, kustomisasi QR Code, dan pantau klik secara langsung.
+            Pendekkan URL, atur nama custom agar rapi, kustomisasi QR Code, bagikan link, dan pantau klik secara langsung.
           </p>
         </header>
 
@@ -902,6 +942,29 @@ export function App() {
                   >
                     {copiedCode === result.short_code ? 'Tersalin' : 'Salin'}
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleNativeShare(result)}
+                    style={styles.secondaryButton}
+                  >
+                    {sharedCode === result.short_code ? 'Dibagikan' : 'Bagikan'}
+                  </button>
+                  <a
+                    href={getWhatsAppShareUrl(result)}
+                    target="_blank"
+                    rel="noreferrer"
+                    style={{ ...styles.secondaryButton, textDecoration: 'none' }}
+                  >
+                    WhatsApp
+                  </a>
+                  <a
+                    href={getTelegramShareUrl(result)}
+                    target="_blank"
+                    rel="noreferrer"
+                    style={{ ...styles.secondaryButton, textDecoration: 'none' }}
+                  >
+                    Telegram
+                  </a>
                   <button
                     type="button"
                     onClick={() => void handleToggleQr(result.short_code, result.short_url)}
@@ -1001,7 +1064,7 @@ export function App() {
             <div style={styles.historyTop}>
               <div>
                 <h2 style={styles.sectionTitle}>Riwayat ({history.length})</h2>
-                <p style={styles.sectionDesc}>Klik link untuk menguji klik atau kustomisasi QR.</p>
+                <p style={styles.sectionDesc}>Klik link untuk menguji klik, bagikan, atau kustomisasi QR.</p>
               </div>
               {history.length > 0 && (
                 <button
@@ -1048,6 +1111,29 @@ export function App() {
                       >
                         {copiedCode === item.short_code ? 'Tersalin' : 'Salin'}
                       </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleNativeShare(item)}
+                        style={styles.miniButton}
+                      >
+                        {sharedCode === item.short_code ? 'Dibagikan' : 'Bagikan'}
+                      </button>
+                      <a
+                        href={getWhatsAppShareUrl(item)}
+                        target="_blank"
+                        rel="noreferrer"
+                        style={{ ...styles.miniButton, textDecoration: 'none' }}
+                      >
+                        WhatsApp
+                      </a>
+                      <a
+                        href={getTelegramShareUrl(item)}
+                        target="_blank"
+                        rel="noreferrer"
+                        style={{ ...styles.miniButton, textDecoration: 'none' }}
+                      >
+                        Telegram
+                      </a>
                       <button
                         type="button"
                         onClick={() => void handleToggleQr(item.short_code, item.short_url)}
@@ -1207,6 +1293,8 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 500,
     fontSize: '0.85rem',
     cursor: 'pointer',
+    display: 'inline-flex',
+    alignItems: 'center',
   },
   dangerOutlineButton: {
     padding: '6px 12px',
@@ -1285,6 +1373,7 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     gap: '8px',
     flexWrap: 'wrap',
+    alignItems: 'center',
   },
   qrBox: {
     padding: '14px',
@@ -1558,6 +1647,8 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '0.78rem',
     fontWeight: 500,
     cursor: 'pointer',
+    display: 'inline-flex',
+    alignItems: 'center',
   },
   miniDangerButton: {
     padding: '4px 9px',
