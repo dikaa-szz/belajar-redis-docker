@@ -1363,7 +1363,7 @@ const styles: Record<string, React.CSSProperties> = {
     gap: '12px',
     flexWrap: 'wrap',
   },
-  shortUrlLink: {
+  d: {
     fontSize: '1.05rem',
     fontWeight: 700,
     color: '#2563eb',
