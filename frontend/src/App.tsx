@@ -838,8 +838,6 @@ export function App() {
       <div style={styles.container}>
         <header style={styles.header}>
           <div style={styles.badgeRow}>
-            <span style={styles.badge}>Laravel API</span>
-            <span style={styles.badge}>MySQL</span>
             <span style={styles.badge}>Custom QR Code</span>
             <span style={styles.badge}>Bagikan Link</span>
           </div>
@@ -1363,7 +1361,7 @@ const styles: Record<string, React.CSSProperties> = {
     gap: '12px',
     flexWrap: 'wrap',
   },
-  d: {
+  shortUrlLink: {
     fontSize: '1.05rem',
     fontWeight: 700,
     color: '#2563eb',
